@@ -1,0 +1,172 @@
+"use node";
+
+import { v } from "convex/values";
+import { action } from "./_generated/server";
+import { api } from "./_generated/api";
+import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const pdfParse = require("pdf-parse");
+
+function getS3Client() {
+  return new S3Client({
+    region: process.env.AWS_REGION ?? "ap-northeast-1",
+    credentials: {
+      accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
+      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
+    },
+  });
+}
+
+async function streamToBuffer(stream: NodeJS.ReadableStream): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
+}
+
+export const generateTest = action({
+  args: {
+    pdfId: v.id("pdfs"),
+    testId: v.id("tests"),
+    questionCount: v.number(),
+    userId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    try {
+      // ── 1. Get PDF record ──────────────────────────────────────────────────
+      const pdf = await ctx.runQuery(api.files.getPdf, { pdfId: args.pdfId });
+      if (!pdf) throw new Error("找不到 PDF 檔案");
+
+      // ── 2. Extract text (cached) ──────────────────────────────────────────
+      let text = pdf.extractedText;
+
+      if (!text) {
+        await ctx.runMutation(api.tests.setTestProgress, {
+          testId: args.testId,
+          message: "正在解析 PDF 內容...",
+        });
+
+        const client = getS3Client();
+        const resp = await client.send(
+          new GetObjectCommand({ Bucket: pdf.s3Bucket, Key: pdf.s3Key })
+        );
+
+        if (!resp.Body) throw new Error("S3 回應沒有檔案內容");
+        const buffer = await streamToBuffer(
+          resp.Body as NodeJS.ReadableStream
+        );
+        const parsed = await pdfParse(buffer);
+        text = parsed.text as string;
+
+        // Clean and truncate – saves tokens on every subsequent generation
+        text = text
+          .replace(/\n{3,}/g, "\n\n")
+          .replace(/[ \t]{2,}/g, " ")
+          .trim()
+          .slice(0, 18000); // ~4 500 tokens – good balance of coverage vs cost
+
+        // Cache extracted text so it's never re-extracted
+        await ctx.runMutation(api.files.updatePdfText, {
+          pdfId: args.pdfId,
+          text,
+        });
+      }
+
+      // ── 3. Call OpenRouter ─────────────────────────────────────────────────
+      await ctx.runMutation(api.tests.setTestProgress, {
+        testId: args.testId,
+        message: "AI 正在生成題目，請稍候...",
+      });
+
+      const model =
+        process.env.OPENROUTER_MODEL ?? "google/gemini-flash-1.5";
+      const apiKey = process.env.OPENROUTER_API_KEY;
+      if (!apiKey) throw new Error("未設定 OPENROUTER_API_KEY");
+
+      // Concise prompt = fewer tokens used
+      const prompt =
+        `根據以下文本生成 ${args.questionCount} 道繁體中文選擇題，` +
+        `每題 4 個選項（A/B/C/D），1 個正確答案。` +
+        `只輸出 JSON，不要 markdown 或任何額外文字：\n` +
+        `{"questions":[{"question":"...","options":["...","...","...","..."],"correctAnswer":0,"explanation":"..."}]}\n` +
+        `correctAnswer 為正確答案的索引（0=A,1=B,2=C,3=D）。\n\n文本：\n${text}`;
+
+      const response = await fetch(
+        "https://openrouter.ai/api/v1/chat/completions",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+            "HTTP-Referer":
+              process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000",
+            "X-Title": "考題練習平台",
+          },
+          body: JSON.stringify({
+            model,
+            messages: [{ role: "user", content: prompt }],
+            temperature: 0.6,
+            max_tokens: 4096,
+          }),
+        }
+      );
+
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`OpenRouter 錯誤：${errText}`);
+      }
+
+      const data = await response.json();
+      const rawContent: string = data.choices[0].message.content ?? "";
+
+      // Strip markdown fences if the model wraps in them
+      const jsonStr = rawContent
+        .replace(/^```(?:json)?\s*/i, "")
+        .replace(/\s*```\s*$/i, "")
+        .trim();
+
+      const parsed = JSON.parse(jsonStr) as {
+        questions: Array<{
+          question: string;
+          options: string[];
+          correctAnswer: number;
+          explanation?: string;
+        }>;
+      };
+
+      // Validate structure
+      if (!Array.isArray(parsed.questions) || parsed.questions.length === 0) {
+        throw new Error("AI 回傳的格式不正確，請重試");
+      }
+
+      const questions = parsed.questions.map((q, i) => ({
+        id: `q${i}`,
+        question: q.question,
+        options: q.options,
+        correctAnswer: q.correctAnswer,
+        explanation: q.explanation ?? "",
+      }));
+
+      const usage = data.usage ?? {};
+
+      // ── 4. Persist questions & token usage ────────────────────────────────
+      await ctx.runMutation(api.tests.finalizeTest, {
+        testId: args.testId,
+        questions,
+        tokensUsed: usage.total_tokens ?? 0,
+        promptTokens: usage.prompt_tokens ?? 0,
+        completionTokens: usage.completion_tokens ?? 0,
+        model,
+      });
+
+      return args.testId;
+    } catch (err) {
+      await ctx.runMutation(api.tests.markTestError, {
+        testId: args.testId,
+        error: String(err),
+      });
+      throw err;
+    }
+  },
+});
