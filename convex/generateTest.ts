@@ -8,15 +8,26 @@ import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
 const pdfParse = require("pdf-parse");
 
 function getS3Client() {
+  const accessKeyId = process.env.AWS_ACCESS_KEY_ID;
+  const secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY;
+  const endpoint = process.env.AWS_ENDPOINT_URL;
+
+  if (!accessKeyId || !secretAccessKey) {
+    throw new Error(
+      "S3 憑證未設定。請在 Convex 後台執行：\n" +
+      "  npx convex env set AWS_ACCESS_KEY_ID     \"<key>\"\n" +
+      "  npx convex env set AWS_SECRET_ACCESS_KEY \"<secret>\"\n" +
+      "  npx convex env set AWS_ENDPOINT_URL      \"https://s3.p.thme.cc\"\n" +
+      "  npx convex env set AWS_S3_BUCKET         \"<bucket>\"\n" +
+      "  npx convex env set AWS_REGION            \"us-east-1\""
+    );
+  }
+
   return new S3Client({
-    // Custom S3-compatible endpoint (e.g. MinIO at s3.p.thme.cc)
-    endpoint: process.env.AWS_ENDPOINT_URL!, // e.g. https://s3.p.thme.cc
+    endpoint: endpoint ?? "https://s3.p.thme.cc",
     region: process.env.AWS_REGION ?? "us-east-1",
-    forcePathStyle: true, // required for non-AWS S3 servers
-    credentials: {
-      accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
-      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
-    },
+    forcePathStyle: true,
+    credentials: { accessKeyId, secretAccessKey },
   });
 }
 
