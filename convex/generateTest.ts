@@ -102,7 +102,10 @@ export const generateTest = action({
         message: "AI 正在生成題目，請稍候...",
       });
 
-      const model = process.env.OPENROUTER_MODEL ?? "google/gemini-flash-1.5";
+      // Default to a paid model that works without OpenRouter data-sharing settings.
+      // Free models (suffix ":free" or google/gemini-flash-1.5 without ":free")
+      // require "Allow free model publication" in https://openrouter.ai/settings/privacy
+      const model = process.env.OPENROUTER_MODEL ?? "openai/gpt-4o-mini";
       const apiKey = process.env.OPENROUTER_API_KEY;
       if (!apiKey) throw new Error("未設定 OPENROUTER_API_KEY");
 
@@ -136,11 +139,26 @@ export const generateTest = action({
 
       if (!response.ok) {
         const errText = await response.text();
-        throw new Error(`OpenRouter 錯誤：${errText}`);
+        // Provide actionable guidance for the most common OpenRouter errors
+        let hint = "";
+        if (errText.includes("data policy") || errText.includes("Free model publication")) {
+          hint =
+            "\n\n解決方式：\n" +
+            "1. 前往 https://openrouter.ai/settings/privacy 啟用「Allow free model publication」，或\n" +
+            "2. 換用付費模型：npx convex env set OPENROUTER_MODEL \"openai/gpt-4o-mini\"";
+        }
+        throw new Error(`OpenRouter 錯誤 (${response.status})：${errText}${hint}`);
       }
 
       const data = await response.json();
-      const rawContent: string = data.choices[0].message.content ?? "";
+      const rawContent: string = data.choices?.[0]?.message?.content ?? "";
+
+      if (!rawContent.trim()) {
+        throw new Error(
+          `AI 回傳空白內容。模型：${model}，` +
+          `finish_reason：${data.choices?.[0]?.finish_reason ?? "未知"}`
+        );
+      }
 
       // Strip markdown fences some models wrap responses in
       const jsonStr = rawContent
@@ -148,14 +166,14 @@ export const generateTest = action({
         .replace(/\s*```\s*$/i, "")
         .trim();
 
-      const parsed = JSON.parse(jsonStr) as {
-        questions: Array<{
-          question: string;
-          options: string[];
-          correctAnswer: number;
-          explanation?: string;
-        }>;
-      };
+      let parsed: { questions: Array<{ question: string; options: string[]; correctAnswer: number; explanation?: string }> };
+      try {
+        parsed = JSON.parse(jsonStr);
+      } catch {
+        throw new Error(
+          `AI 回傳的不是有效 JSON。前 300 字：${jsonStr.slice(0, 300)}`
+        );
+      }
 
       if (!Array.isArray(parsed.questions) || parsed.questions.length === 0) {
         throw new Error("AI 回傳格式不正確，請重試");
