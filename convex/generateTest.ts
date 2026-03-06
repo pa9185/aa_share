@@ -81,14 +81,13 @@ export const generateTest = action({
         const parsed = await pdfParse(buffer);
         text = parsed.text as string;
 
-        // Clean & truncate before caching – this truncated version is what
-        // every future generation for this PDF will use, guaranteeing consistent
-        // token costs and avoiding re-downloading from S3.
+        // 清理並截斷後再快取 — 之後每次生成都沿用此版本，
+        // 確保 token 消耗一致，且不需要重複從 S3 下載。
         text = text
           .replace(/\n{3,}/g, "\n\n")
           .replace(/[ \t]{2,}/g, " ")
           .trim()
-          .slice(0, 18000); // ≈ 4 500 tokens – good balance of depth vs cost
+          .slice(0, 18000); // 約 4500 tokens，兼顧覆蓋率與成本
 
         await ctx.runMutation(api.files.updatePdfText, {
           pdfId: args.pdfId,
@@ -102,9 +101,9 @@ export const generateTest = action({
         message: "AI 正在生成題目，請稍候...",
       });
 
-      // Default to a paid model that works without OpenRouter data-sharing settings.
-      // Free models (suffix ":free" or google/gemini-flash-1.5 without ":free")
-      // require "Allow free model publication" in https://openrouter.ai/settings/privacy
+      // 預設使用付費模型，無需在 OpenRouter 開啟資料分享設定。
+      // 免費模型（如 google/gemini-flash-1.5 未加 ":free"）需先至
+      // https://openrouter.ai/settings/privacy 啟用「Allow free model publication」。
       const model = process.env.OPENROUTER_MODEL ?? "openai/gpt-4o-mini";
       const apiKey = process.env.OPENROUTER_API_KEY;
       if (!apiKey) throw new Error("未設定 OPENROUTER_API_KEY");
@@ -137,9 +136,8 @@ export const generateTest = action({
         }
       );
 
-      // Always consume body as text first – response.json() itself throws
-      // "Unexpected end of JSON input" when the body is empty or truncated,
-      // which bypasses any outer try/catch.
+      // 先以純文字讀取回應內容，避免 response.json() 在內容為空時
+      // 直接拋出原生 SyntaxError 而繞過外層 try/catch
       const responseText = await response.text();
 
       if (!response.ok) {
@@ -149,32 +147,34 @@ export const generateTest = action({
           responseText.includes("Free model publication")
         ) {
           hint =
-            " | 解決：前往 https://openrouter.ai/settings/privacy 啟用「Allow free model publication」，或改用付費模型：npx convex env set OPENROUTER_MODEL \"openai/gpt-4o-mini\"";
+            "｜解決方式：前往 https://openrouter.ai/settings/privacy 啟用「Allow free model publication」，" +
+            "或改用付費模型：npx convex env set OPENROUTER_MODEL \"openai/gpt-4o-mini\"";
         }
         throw new Error(
-          `OpenRouter HTTP ${response.status}: ${responseText.slice(0, 400)}${hint}`
+          `OpenRouter 請求失敗（狀態碼 ${response.status}）：${responseText.slice(0, 400)}${hint ? "\n" + hint : ""}`
         );
       }
 
-      // Parse the outer OpenRouter envelope
+      // 解析 OpenRouter 外層回應
       let data: any;
       try {
         data = JSON.parse(responseText);
       } catch {
         throw new Error(
-          `OpenRouter 回應非 JSON (HTTP ${response.status})，前 300 字：${responseText.slice(0, 300)}`
+          `OpenRouter 回應格式錯誤，非有效 JSON（狀態碼 ${response.status}）。內容前 300 字：${responseText.slice(0, 300)}`
         );
       }
 
       const rawContent: string = data.choices?.[0]?.message?.content ?? "";
 
       if (!rawContent.trim()) {
+        const reason = data.choices?.[0]?.finish_reason ?? "未知";
         throw new Error(
-          `AI 回傳空白內容。模型：${model}，finish_reason：${data.choices?.[0]?.finish_reason ?? "unknown"}`
+          `AI 回傳空白內容。使用模型：${model}，結束原因：${reason}`
         );
       }
 
-      // Strip markdown fences some models wrap responses in
+      // 移除部分模型會加上的 markdown 程式碼區塊標記
       const jsonStr = rawContent
         .replace(/^```(?:json)?\s*/i, "")
         .replace(/\s*```\s*$/i, "")
@@ -185,12 +185,12 @@ export const generateTest = action({
         parsed = JSON.parse(jsonStr);
       } catch {
         throw new Error(
-          `AI 回傳非有效 JSON。前 300 字：${jsonStr.slice(0, 300)}`
+          `AI 回傳非有效 JSON，無法解析。內容前 300 字：${jsonStr.slice(0, 300)}`
         );
       }
 
       if (!Array.isArray(parsed.questions) || parsed.questions.length === 0) {
-        throw new Error("AI 回傳格式不正確，請重試");
+        throw new Error("AI 回傳的題目格式不正確，請重試");
       }
 
       const questions = parsed.questions.map((q, i) => ({
