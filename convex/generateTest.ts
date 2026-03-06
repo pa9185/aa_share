@@ -9,7 +9,10 @@ const pdfParse = require("pdf-parse");
 
 function getS3Client() {
   return new S3Client({
-    region: process.env.AWS_REGION ?? "ap-northeast-1",
+    // Custom S3-compatible endpoint (e.g. MinIO at s3.p.thme.cc)
+    endpoint: process.env.AWS_ENDPOINT_URL!, // e.g. https://s3.p.thme.cc
+    region: process.env.AWS_REGION ?? "us-east-1",
+    forcePathStyle: true, // required for non-AWS S3 servers
     credentials: {
       accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
       secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
