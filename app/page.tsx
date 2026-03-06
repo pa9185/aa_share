@@ -86,7 +86,7 @@ export default function HomePage() {
             </div>
           ) : (
             <div className="grid gap-3 sm:grid-cols-2">
-              {tests.map((test) => (
+              {(tests as NonNullable<typeof tests>).map((test: any) => (
                 <TestCard key={test._id} testId={test._id} />
               ))}
             </div>

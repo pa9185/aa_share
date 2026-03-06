@@ -136,7 +136,7 @@ function AdminDashboard({ secret }: { secret: string }) {
             <Cpu className="h-4 w-4 text-primary" /> 模型使用分佈
           </h2>
           <div className="flex flex-wrap gap-2">
-            {Object.entries(modelBreakdown).map(([model, data]) => (
+            {Object.entries(modelBreakdown as Record<string, { count: number; totalTokens: number }>).map(([model, data]) => (
               <Card key={model} className="flex-1 min-w-[180px]">
                 <CardContent className="p-3">
                   <p className="text-xs font-mono text-accent-foreground truncate">{model}</p>
@@ -179,7 +179,7 @@ function AdminDashboard({ secret }: { secret: string }) {
                   </TableCell>
                 </TableRow>
               ) : (
-                tokenHistory.map((r) => (
+                (tokenHistory as NonNullable<typeof tokenHistory>).map((r: any) => (
                   <TableRow key={r._id}>
                     <TableCell className="text-xs">{formatDateShort(r.createdAt)}</TableCell>
                     <TableCell className="text-xs font-mono text-muted-foreground max-w-[120px] truncate">
@@ -228,7 +228,7 @@ function AdminDashboard({ secret }: { secret: string }) {
                   </TableCell>
                 </TableRow>
               ) : (
-                tests.map((t) => (
+                (tests as NonNullable<typeof tests>).map((t: any) => (
                   <TableRow key={t._id}>
                     <TableCell className="max-w-[200px] truncate text-sm font-medium">
                       {t.title}

@@ -28,7 +28,7 @@ dist/
 
 # Convex
 .convex/
-convex/_generated/
+# convex/_generated/ is committed as stubs; `npx convex dev` will overwrite them
 
 # vercel
 .vercel

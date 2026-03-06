@@ -36,7 +36,7 @@ export const generateTest = action({
     shareToken: v.string(),
     title: v.string(),
   },
-  handler: async (ctx, args) => {
+  handler: async (ctx, args): Promise<string> => {
     // ── 1. Create test record with "generating" status ─────────────────────
     const testId = await ctx.runMutation(api.tests.createTestRecord, {
       pdfId: args.pdfId,
