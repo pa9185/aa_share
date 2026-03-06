@@ -48,8 +48,7 @@ export async function POST(req: NextRequest) {
         Key: s3Key,
         Body: buffer,
         ContentType: "application/pdf",
-        // Files are private; Convex actions access them with IAM credentials
-        ACL: "private",
+        // Do NOT set ACL – modern S3 buckets use bucket-level policies instead.
       })
     );
 

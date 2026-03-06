@@ -5,7 +5,10 @@ import { query } from "./_generated/server";
 
 export const getStats = query({
   args: {},
-  handler: async (ctx) => {
+  handler: async (ctx): Promise<{
+    totalPdfs: number; totalTests: number; readyTests: number; errorTests: number;
+    totalAttempts: number; totalTokens: number; promptTokens: number; completionTokens: number;
+  }> => {
     const [pdfs, tests, attempts, tokens] = await Promise.all([
       ctx.db.query("pdfs").collect(),
       ctx.db.query("tests").collect(),
@@ -62,12 +65,9 @@ export const getTokenUsageHistory = query({
 
 export const getModelBreakdown = query({
   args: {},
-  handler: async (ctx) => {
+  handler: async (ctx): Promise<Record<string, { count: number; totalTokens: number }>> => {
     const records = await ctx.db.query("tokenUsage").collect();
-    const breakdown: Record<
-      string,
-      { count: number; totalTokens: number }
-    > = {};
+    const breakdown: Record<string, { count: number; totalTokens: number }> = {};
     for (const r of records) {
       if (!breakdown[r.model]) {
         breakdown[r.model] = { count: 0, totalTokens: 0 };
