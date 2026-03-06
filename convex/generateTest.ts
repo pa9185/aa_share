@@ -137,26 +137,40 @@ export const generateTest = action({
         }
       );
 
+      // Always consume body as text first – response.json() itself throws
+      // "Unexpected end of JSON input" when the body is empty or truncated,
+      // which bypasses any outer try/catch.
+      const responseText = await response.text();
+
       if (!response.ok) {
-        const errText = await response.text();
-        // Provide actionable guidance for the most common OpenRouter errors
         let hint = "";
-        if (errText.includes("data policy") || errText.includes("Free model publication")) {
+        if (
+          responseText.includes("data policy") ||
+          responseText.includes("Free model publication")
+        ) {
           hint =
-            "\n\n解決方式：\n" +
-            "1. 前往 https://openrouter.ai/settings/privacy 啟用「Allow free model publication」，或\n" +
-            "2. 換用付費模型：npx convex env set OPENROUTER_MODEL \"openai/gpt-4o-mini\"";
+            " | 解決：前往 https://openrouter.ai/settings/privacy 啟用「Allow free model publication」，或改用付費模型：npx convex env set OPENROUTER_MODEL \"openai/gpt-4o-mini\"";
         }
-        throw new Error(`OpenRouter 錯誤 (${response.status})：${errText}${hint}`);
+        throw new Error(
+          `OpenRouter HTTP ${response.status}: ${responseText.slice(0, 400)}${hint}`
+        );
       }
 
-      const data = await response.json();
+      // Parse the outer OpenRouter envelope
+      let data: any;
+      try {
+        data = JSON.parse(responseText);
+      } catch {
+        throw new Error(
+          `OpenRouter 回應非 JSON (HTTP ${response.status})，前 300 字：${responseText.slice(0, 300)}`
+        );
+      }
+
       const rawContent: string = data.choices?.[0]?.message?.content ?? "";
 
       if (!rawContent.trim()) {
         throw new Error(
-          `AI 回傳空白內容。模型：${model}，` +
-          `finish_reason：${data.choices?.[0]?.finish_reason ?? "未知"}`
+          `AI 回傳空白內容。模型：${model}，finish_reason：${data.choices?.[0]?.finish_reason ?? "unknown"}`
         );
       }
 
@@ -171,7 +185,7 @@ export const generateTest = action({
         parsed = JSON.parse(jsonStr);
       } catch {
         throw new Error(
-          `AI 回傳的不是有效 JSON。前 300 字：${jsonStr.slice(0, 300)}`
+          `AI 回傳非有效 JSON。前 300 字：${jsonStr.slice(0, 300)}`
         );
       }
 
