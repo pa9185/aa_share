@@ -28,23 +28,33 @@ async function streamToBuffer(stream: NodeJS.ReadableStream): Promise<Buffer> {
 export const generateTest = action({
   args: {
     pdfId: v.id("pdfs"),
-    testId: v.id("tests"),
     questionCount: v.number(),
     userId: v.string(),
+    shareToken: v.string(),
+    title: v.string(),
   },
   handler: async (ctx, args) => {
+    // ── 1. Create test record with "generating" status ─────────────────────
+    const testId = await ctx.runMutation(api.tests.createTestRecord, {
+      pdfId: args.pdfId,
+      userId: args.userId,
+      title: args.title,
+      questionCount: args.questionCount,
+      shareToken: args.shareToken,
+    });
+
     try {
-      // ── 1. Get PDF record ──────────────────────────────────────────────────
+      // ── 2. Get PDF record ────────────────────────────────────────────────
       const pdf = await ctx.runQuery(api.files.getPdf, { pdfId: args.pdfId });
       if (!pdf) throw new Error("找不到 PDF 檔案");
 
-      // ── 2. Extract text (cached) ──────────────────────────────────────────
+      // ── 3. Extract text (cached in Convex to save S3 bandwidth + tokens) ─
       let text = pdf.extractedText;
 
       if (!text) {
         await ctx.runMutation(api.tests.setTestProgress, {
-          testId: args.testId,
-          message: "正在解析 PDF 內容...",
+          testId,
+          message: "正在從 S3 下載並解析 PDF...",
         });
 
         const client = getS3Client();
@@ -53,38 +63,36 @@ export const generateTest = action({
         );
 
         if (!resp.Body) throw new Error("S3 回應沒有檔案內容");
-        const buffer = await streamToBuffer(
-          resp.Body as NodeJS.ReadableStream
-        );
+        const buffer = await streamToBuffer(resp.Body as NodeJS.ReadableStream);
         const parsed = await pdfParse(buffer);
         text = parsed.text as string;
 
-        // Clean and truncate – saves tokens on every subsequent generation
+        // Clean & truncate before caching – this truncated version is what
+        // every future generation for this PDF will use, guaranteeing consistent
+        // token costs and avoiding re-downloading from S3.
         text = text
           .replace(/\n{3,}/g, "\n\n")
           .replace(/[ \t]{2,}/g, " ")
           .trim()
-          .slice(0, 18000); // ~4 500 tokens – good balance of coverage vs cost
+          .slice(0, 18000); // ≈ 4 500 tokens – good balance of depth vs cost
 
-        // Cache extracted text so it's never re-extracted
         await ctx.runMutation(api.files.updatePdfText, {
           pdfId: args.pdfId,
           text,
         });
       }
 
-      // ── 3. Call OpenRouter ─────────────────────────────────────────────────
+      // ── 4. Call OpenRouter ───────────────────────────────────────────────
       await ctx.runMutation(api.tests.setTestProgress, {
-        testId: args.testId,
+        testId,
         message: "AI 正在生成題目，請稍候...",
       });
 
-      const model =
-        process.env.OPENROUTER_MODEL ?? "google/gemini-flash-1.5";
+      const model = process.env.OPENROUTER_MODEL ?? "google/gemini-flash-1.5";
       const apiKey = process.env.OPENROUTER_API_KEY;
       if (!apiKey) throw new Error("未設定 OPENROUTER_API_KEY");
 
-      // Concise prompt = fewer tokens used
+      // Keep the prompt concise – every token costs money
       const prompt =
         `根據以下文本生成 ${args.questionCount} 道繁體中文選擇題，` +
         `每題 4 個選項（A/B/C/D），1 個正確答案。` +
@@ -120,7 +128,7 @@ export const generateTest = action({
       const data = await response.json();
       const rawContent: string = data.choices[0].message.content ?? "";
 
-      // Strip markdown fences if the model wraps in them
+      // Strip markdown fences some models wrap responses in
       const jsonStr = rawContent
         .replace(/^```(?:json)?\s*/i, "")
         .replace(/\s*```\s*$/i, "")
@@ -135,9 +143,8 @@ export const generateTest = action({
         }>;
       };
 
-      // Validate structure
       if (!Array.isArray(parsed.questions) || parsed.questions.length === 0) {
-        throw new Error("AI 回傳的格式不正確，請重試");
+        throw new Error("AI 回傳格式不正確，請重試");
       }
 
       const questions = parsed.questions.map((q, i) => ({
@@ -150,9 +157,9 @@ export const generateTest = action({
 
       const usage = data.usage ?? {};
 
-      // ── 4. Persist questions & token usage ────────────────────────────────
+      // ── 5. Persist & record token usage ─────────────────────────────────
       await ctx.runMutation(api.tests.finalizeTest, {
-        testId: args.testId,
+        testId,
         questions,
         tokensUsed: usage.total_tokens ?? 0,
         promptTokens: usage.prompt_tokens ?? 0,
@@ -160,10 +167,10 @@ export const generateTest = action({
         model,
       });
 
-      return args.testId;
+      return testId;
     } catch (err) {
       await ctx.runMutation(api.tests.markTestError, {
-        testId: args.testId,
+        testId,
         error: String(err),
       });
       throw err;
